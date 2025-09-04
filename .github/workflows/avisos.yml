@@ -35,7 +35,6 @@ jobs:
           MAIL_PASS: ${{ secrets.MAIL_PASS }}
           MAIL_TO:   ${{ secrets.MAIL_TO }}
           URL_TABLA: ${{ secrets.URL_TABLA }}
-        run: |
-          python test_mail.py --url "$URL_TABLA" --chromium
+
         run: |
           python test_mail.py --url "$URL_TABLA" --chromium
