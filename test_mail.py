@@ -5,18 +5,19 @@ import os, re, smtplib, unicodedata, argparse
 from datetime import date, timedelta
 from email.mime.text import MIMEText
 from email.utils import formatdate
+from html import escape
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
 # =============== CONFIG ===============
-# ⚠️ PONÉ ACÁ LA URL EXACTA DEL LISTADO (NO LA HOME)
+# ⚠️ URL por defecto (podés pasar --url en CLI o usar secret URL_TABLA en Actions)
 DEFAULT_URL = "https://educacionales.mendoza.edu.ar/"
 
 TABLE_WAIT_MS = 30_000
 AFTER_FILTER_WAIT_MS = 4_000
 MAX_PAGES = 200  # cortafuegos anti-loop
 
-# Columnas que intentaremos mostrar primero en el mail/consola (si existen)
+# Columnas preferidas para mostrar (si existen)
 PREFERRED_COLS = [
     "Llamado","Nivel","Departamento","Localidad",
     "Escuela","Cargo","Horas","Turno","Materia","Publicado"
@@ -26,22 +27,30 @@ PREFERRED_COLS = [
 ALLOWED_DEPTOS = {"SAN MARTIN","JUNIN","RIVADAVIA","CAPITAL","GODOY CRUZ","MAIPU","GUAYMALLEN"}
 
 # Bloqueos por materia/cargo (normalizados SIN acento y en mayúsculas)
-BLOCK_PATTERNS = ("POLITICA","AMBIENTALES","MICROEMPRENDIMIENTOS","ARTISTICA","LENGUA", "QUIMICA", "PRECEPT", "ORIENTADOR PSICOPEDAGOGICO","CIENCIAS SOCIALES","EDUCACION FISICA","BIOLOGIA", "FORMACION PARA LA VIDA Y EL TRABAJO","RECURSOS TURISTICOS","TEATRO","SOCIAL","MARCO JURIDICO","TURISMO","CONTABLE","REGENTE","VICEDIRECTOR","DIRECTOR")  # coincide con LENGUA EXTRANJERA, QUIMICA, PRECEPTOR/ES
+# Coincide con LENGUA (incluye “LENGUA EXTRANJERA”), QUIMICA/QUÍMICA, PRECEPTOR/ES
+BLOCK_PATTERNS =("POLITICA","AMBIENTALES","MICROEMPRENDIMIENTOS","ARTISTICA","LENGUA", "QUIMICA", "PRECEPT", "ORIENTADOR PSICOPEDAGOGICO","CIENCIAS SOCIALES","EDUCACION FISICA","BIOLOGIA", "FORMACION PARA LA VIDA Y EL TRABAJO","RECURSOS TURISTICOS","TEATRO","SOCIAL","MARCO JURIDICO","TURISMO","CONTABLE","REGENTE","VICEDIRECTOR","DIRECTOR")  # coincide con LENGUA EXTRANJERA, QUIMICA, PRECEPTOR/ES
 
 # =============== EMAIL (.env) ===============
 load_dotenv()
-MAIL_HOST = os.getenv("MAIL_HOST")
-MAIL_PORT = int(os.getenv("MAIL_PORT", "465"))
-MAIL_USER = os.getenv("MAIL_USER")
-MAIL_PASS = os.getenv("MAIL_PASS")
-MAIL_TO   = os.getenv("MAIL_TO")
 
-def send_email(subject: str, body: str):
+def getenv_stripped(name, default=None):
+    v = os.getenv(name, default)
+    return v.strip() if isinstance(v, str) else v
+
+MAIL_HOST = getenv_stripped("MAIL_HOST")
+MAIL_PORT = int(getenv_stripped("MAIL_PORT", "465"))
+MAIL_USER = getenv_stripped("MAIL_USER")
+MAIL_PASS = getenv_stripped("MAIL_PASS")
+MAIL_TO   = getenv_stripped("MAIL_TO")
+
+def send_email_html(subject: str, html_body: str):
     miss = [k for k,v in [("MAIL_HOST",MAIL_HOST),("MAIL_PORT",MAIL_PORT),("MAIL_USER",MAIL_USER),
                           ("MAIL_PASS",MAIL_PASS),("MAIL_TO",MAIL_TO)] if not v]
     if miss:
         raise RuntimeError(f"Faltan variables en .env: {', '.join(miss)}")
-    msg = MIMEText(body, _charset="utf-8")
+    if "=" in MAIL_HOST:  # error típico cuando se mete "MAIL_HOST=smtp..."
+        raise RuntimeError(f"MAIL_HOST luce mal: {MAIL_HOST!r}. Debe ser solo 'smtp.gmail.com'.")
+    msg = MIMEText(html_body, "html", "utf-8")
     msg["Subject"] = subject
     msg["From"] = MAIL_USER
     msg["To"] = MAIL_TO
@@ -69,7 +78,9 @@ def parse_publicado_to_date(s: str):
         return None
 
 def _try_global_search(page, query: str):
-    for sel in ("input[type='search']", "input[placeholder*='Buscar']", "input[aria-label*='Buscar']"):
+    for sel in ("input[type='search']",
+                "input[placeholder*='Buscar']",
+                "input[aria-label*='Buscar']"):
         el = page.query_selector(sel)
         if el:
             el.fill("")
@@ -326,6 +337,7 @@ def scrape_all_pages(url: str, headful=False, debug=False, use_chromium=False):
         browser.close()
         return headers, all_matches, today, yesterday
 
+# ---------- Salidas ----------
 def rows_to_text(headers, rows):
     name_map = {h.lower(): h for h in headers}
     chosen = [name_map[c.lower()] for c in PREFERRED_COLS if c.lower() in name_map] or headers
@@ -334,6 +346,43 @@ def rows_to_text(headers, rows):
         parts = [f"{h}: {r.get(h,'')}" for h in chosen]
         lines.append(f"{i:02d}) " + " | ".join(parts))
     return "\n".join(lines)
+
+def rows_to_html(headers, rows, url, today, yesterday):
+    name_map = {h.lower(): h for h in headers}
+    chosen = [name_map[c.lower()] for c in PREFERRED_COLS if c.lower() in name_map] or headers
+
+    css = """
+    <style>
+      body { font-family: system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial; color:#111; }
+      .meta { margin: 0 0 12px 0; color:#444; }
+      table { border-collapse: collapse; width: 100%; font-size: 14px; }
+      th, td { border: 1px solid #e5e5e5; padding: 6px 8px; text-align: left; vertical-align: top; }
+      thead th { background: #f6f8fa; position: sticky; top: 0; }
+      tbody tr:nth-child(odd) { background: #fafafa; }
+      .muted { color:#666; font-size:12px; }
+    </style>
+    """
+
+    head = "".join(f"<th>{escape(h)}</th>" for h in chosen)
+    body_rows = []
+    for r in rows:
+        tds = "".join(f"<td>{escape(r.get(h,'') or '')}</td>" for h in chosen)
+        body_rows.append(f"<tr>{tds}</tr>")
+    body = "\n".join(body_rows)
+
+    return f"""
+    <html>
+      <head>{css}</head>
+      <body>
+        <p class="meta"><b>{len(rows)}</b> coincidencia(s). Filtros: Nivel=Secundario; Departamentos={", ".join(sorted(ALLOWED_DEPTOS))}; Publicado en hoy ({today:%d/%m/%Y}) o ayer ({yesterday:%d/%m/%Y}).</p>
+        <table>
+          <thead><tr>{head}</tr></thead>
+          <tbody>{body}</tbody>
+        </table>
+        <p class="muted">Fuente: {escape(url)}</p>
+      </body>
+    </html>
+    """
 
 # =============== CLI ===============
 def main():
@@ -360,20 +409,15 @@ def main():
         print("ℹ️ No hubo coincidencias con los filtros (Nivel=Secundario + dptos elegidos + Publicado hoy/ayer, excluyendo Lengua/Química/Preceptor).")
         return
 
-    texto = rows_to_text(headers, matches)
+    # Consola (texto) y correo (HTML)
     print(f"\n✅ {len(matches)} coincidencia(s) totales:\n")
-    print(texto)
+    print(rows_to_text(headers, matches))
 
     if not args.no_email:
-        subject = f"[Avisos] {len(matches)} coincidencias • Secundario • Hoy/Ayer • Deptos seleccionados (sin Lengua/Química/Preceptor)"
-        body = (
-            f"Coincidencias para Nivel='Secundario', Departamento en {sorted(ALLOWED_DEPTOS)}, "
-            f"Publicado ∈ {{hoy({today:%d/%m/%Y}), ayer({yesterday:%d/%m/%Y})}}, "
-            f"excluyendo materias/puestos de Lengua, Química y Preceptor.\n"
-            f"Fuente: {args.url}\n\n{texto}\n\n— Script automático"
-        )
+        subject = f"[Avisos] {len(matches)} coincidencias • Secundario • Hoy/Ayer • Deptos seleccionados"
+        html = rows_to_html(headers, matches, args.url, today, yesterday)
         try:
-            send_email(subject, body)
+            send_email_html(subject, html)
             print(f"\n📧 Email enviado a {MAIL_TO}.")
         except Exception as e:
             print(f"\n📭 No se pudo enviar el correo: {e}")
