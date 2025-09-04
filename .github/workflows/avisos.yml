@@ -2,8 +2,8 @@ name: Avisos Secundario
 
 on:
   schedule:
-    - cron: "0 23 * * *"   # todos los días 20:00 (UTC-3) = 23:00 UTC
-  workflow_dispatch: {}    # para ejecutarlo a mano desde ActionsSS
+    - cron: '0 23 * * *'   # todos los días 20:00 AR (UTC-3)
+  workflow_dispatch: {}
 
 jobs:
   run:
@@ -13,19 +13,18 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
-
-      # Instala deps del SO + navegadores Playwright
-      - name: Install Playwright deps
-        uses: microsoft/playwright-github-action@v1
-        with:
-          version: "1.48.0"
+          python-version: '3.10'
 
       - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          python -m playwright install chromium
+
+      # Navegador + dependencias del SO (Ubuntu) para Playwright
+      - name: Install Playwright browsers and system deps
+        run: |
+          sudo apt-get update
+          python -m playwright install --with-deps chromium
 
       - name: Run scraper
         env:
@@ -35,6 +34,5 @@ jobs:
           MAIL_PASS: ${{ secrets.MAIL_PASS }}
           MAIL_TO:   ${{ secrets.MAIL_TO }}
           URL_TABLA: ${{ secrets.URL_TABLA }}
-
         run: |
           python test_mail.py --url "$URL_TABLA" --chromium
