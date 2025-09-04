@@ -3,7 +3,7 @@ name: Avisos Secundario
 on:
   schedule:
     - cron: "0 23 * * *"   # todos los días 20:00 (UTC-3) = 23:00 UTC
-  workflow_dispatch: {}    # para ejecutarlo a mano desde ActionsS
+  workflow_dispatch: {}    # para ejecutarlo a mano desde ActionsSS
 
 jobs:
   run:
